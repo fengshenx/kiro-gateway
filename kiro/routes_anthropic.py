@@ -151,7 +151,35 @@ async def messages(
     
     # Note: prepare_new_request() and log_request_body() are now called by DebugLoggerMiddleware
     # This ensures debug logging works even for requests that fail Pydantic validation (422 errors)
-    
+
+    # Extract system messages from messages array into top-level system field
+    system_texts = []
+    non_system_messages = []
+    for msg in request_data.messages:
+        if msg.role == "system":
+            if isinstance(msg.content, str):
+                system_texts.append(msg.content)
+            elif isinstance(msg.content, list):
+                for block in msg.content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        system_texts.append(block["text"])
+                    elif hasattr(block, "type") and block.type == "text":
+                        system_texts.append(block.text)
+        else:
+            non_system_messages.append(msg)
+
+    if system_texts:
+        extracted_system = "\n\n".join(system_texts)
+        if request_data.system:
+            if isinstance(request_data.system, str):
+                request_data.system = request_data.system + "\n\n" + extracted_system
+            else:
+                request_data.system = str(request_data.system) + "\n\n" + extracted_system
+        else:
+            request_data.system = extracted_system
+        request_data.messages = non_system_messages
+        logger.debug(f"Extracted {len(system_texts)} system message(s) from messages array into system field")
+
     # Check for truncation recovery opportunities
     from kiro.truncation_state import get_tool_truncation, get_content_truncation
     from kiro.truncation_recovery import generate_truncation_tool_result, generate_truncation_user_message
