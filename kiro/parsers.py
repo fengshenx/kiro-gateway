@@ -327,7 +327,9 @@ class AwsEventStreamParser:
         elif event_type == 'usage':
             return {"type": "usage", "data": data.get('usage', 0)}
         elif event_type == 'context_usage':
-            return {"type": "context_usage", "data": data.get('contextUsagePercentage', 0)}
+            val = data.get('contextUsagePercentage', 0)
+            logger.info(f"[AWS EventStream Debug] Parsed contextUsagePercentage event from Kiro stream: {val}%")
+            return {"type": "context_usage", "data": val}
         
         return None
     

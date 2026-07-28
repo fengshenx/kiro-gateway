@@ -356,9 +356,17 @@ def calculate_tokens_from_context_usage(
         max_input_tokens = model_cache.get_max_input_tokens(model)
         total_tokens = int((context_usage_percentage / 100) * max_input_tokens)
         prompt_tokens = max(0, total_tokens - completion_tokens)
+        logger.info(
+            f"[Context Usage Debug] Kiro API context_usage_percentage={context_usage_percentage}%, "
+            f"model='{model}', max_input_tokens={max_input_tokens} -> "
+            f"calculated total_tokens={total_tokens}, completion_tokens={completion_tokens}, prompt_tokens={prompt_tokens}"
+        )
         return prompt_tokens, total_tokens, "subtraction", "API Kiro"
     
-    # Fallback: no context usage data
+    logger.info(
+        f"[Context Usage Debug] Kiro API returned NO context_usage_percentage (val={context_usage_percentage}). "
+        f"Falling back to local tiktoken estimation."
+    )
     return 0, completion_tokens, "unknown", "tiktoken"
 
 
