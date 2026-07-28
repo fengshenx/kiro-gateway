@@ -35,7 +35,7 @@ import sqlite3
 from datetime import datetime, timezone, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import httpx
 from loguru import logger
@@ -492,7 +492,7 @@ class KiroAuthManager:
         except Exception as e:
             logger.error(f"Error loading enterprise device registration: {e}")
 
-    def _load_kiro_ide_profile(self, profile_path: Optional[Path | str] = None) -> None:
+    def _load_kiro_ide_profile(self, profile_path: Optional[Union[Path, str]] = None) -> None:
         """
         Loads profile ARN from Kiro IDE's profile.json file if profile_arn is not set.
 
