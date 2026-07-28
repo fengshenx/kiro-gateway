@@ -4251,3 +4251,145 @@ class TestAPIRegionPriorityHierarchy:
         print(f"Result: api_host={manager5._api_host}")
         assert "ap-south-1" in manager5._api_host
 
+
+class TestKiroAuthManagerKiroIDEProfileAutoDetection:
+    """
+    Unit tests for Kiro IDE profile.json auto-detection feature.
+    
+    Verifies that when credentials file contains clientIdHash (Kiro IDE) and profileArn is empty,
+    KiroAuthManager automatically loads the profile ARN from globalStorage/kiro.kiroagent/profile.json.
+    """
+
+    @pytest.fixture
+    def temp_kiro_ide_creds_no_profile(self, tmp_path):
+        """Creates a temporary Kiro IDE credentials file without profileArn."""
+        creds_file = tmp_path / "kiro-auth-token.json"
+        creds_data = {
+            "accessToken": "test_access_token",
+            "refreshToken": "test_refresh_token",
+            "clientIdHash": "test_client_id_hash_123",
+            "expiresAt": "2030-01-01T00:00:00Z"
+        }
+        with open(creds_file, "w", encoding="utf-8") as f:
+            json.dump(creds_data, f)
+
+        device_reg_dir = tmp_path / ".aws" / "sso" / "cache"
+        device_reg_dir.mkdir(parents=True, exist_ok=True)
+        device_reg_file = device_reg_dir / "test_client_id_hash_123.json"
+        device_reg_data = {
+            "clientId": "test_client_id",
+            "clientSecret": "test_client_secret"
+        }
+        with open(device_reg_file, "w", encoding="utf-8") as f:
+            json.dump(device_reg_data, f)
+
+        return creds_file, device_reg_dir
+
+    def test_auto_detect_profile_arn_from_profile_json(self, temp_kiro_ide_creds_no_profile, tmp_path, monkeypatch):
+        """
+        What it does: Verifies auto-loading profile ARN from profile.json when profileArn is missing in creds.
+        Purpose: Ensure Kiro IDE users get automatic profile ARN detection without manual config.
+        """
+        creds_file, device_reg_dir = temp_kiro_ide_creds_no_profile
+        
+        # Create a mock profile.json at a candidate path
+        profile_json_dir = tmp_path / "Library" / "Application Support" / "Kiro" / "User" / "globalStorage" / "kiro.kiroagent"
+        profile_json_dir.mkdir(parents=True, exist_ok=True)
+        profile_json_file = profile_json_dir / "profile.json"
+        
+        profile_arn_expected = "arn:aws:codewhisperer:us-east-1:123456789012:profile/MP9HCP3PUQRQ"
+        profile_data = {
+            "arn": profile_arn_expected,
+            "name": "KiroProfile-us-east-1"
+        }
+        with open(profile_json_file, "w", encoding="utf-8") as f:
+            json.dump(profile_data, f)
+
+        monkeypatch.setattr("kiro.auth.Path.home", lambda: tmp_path)
+        
+        manager = KiroAuthManager(creds_file=str(creds_file))
+
+        assert manager.profile_arn == profile_arn_expected
+        assert manager._detected_api_region == "us-east-1"
+
+    def test_preserve_existing_profile_arn_when_present_in_creds(self, tmp_path, monkeypatch):
+        """
+        What it does: Verifies existing profileArn in creds file is not overwritten by profile.json.
+        Purpose: Respect explicit profileArn in credentials file.
+        """
+        creds_file = tmp_path / "kiro-auth-token.json"
+        explicit_arn = "arn:aws:codewhisperer:us-west-2:11111:profile/EXPLICIT"
+        creds_data = {
+            "accessToken": "test_access_token",
+            "refreshToken": "test_refresh_token",
+            "clientIdHash": "test_hash_456",
+            "profileArn": explicit_arn
+        }
+        with open(creds_file, "w", encoding="utf-8") as f:
+            json.dump(creds_data, f)
+
+        profile_json_dir = tmp_path / "Library" / "Application Support" / "Kiro" / "User" / "globalStorage" / "kiro.kiroagent"
+        profile_json_dir.mkdir(parents=True, exist_ok=True)
+        profile_json_file = profile_json_dir / "profile.json"
+        with open(profile_json_file, "w", encoding="utf-8") as f:
+            json.dump({"arn": "arn:aws:codewhisperer:us-east-1:22222:profile/OTHER"}, f)
+
+        monkeypatch.setattr("kiro.auth.Path.home", lambda: tmp_path)
+
+        manager = KiroAuthManager(creds_file=str(creds_file))
+
+        assert manager.profile_arn == explicit_arn
+
+    def test_load_kiro_ide_profile_handles_missing_file_gracefully(self, temp_kiro_ide_creds_no_profile, tmp_path, monkeypatch):
+        """
+        What it does: Verifies missing profile.json file does not crash loading.
+        Purpose: Graceful degradation when profile.json is absent.
+        """
+        creds_file, _ = temp_kiro_ide_creds_no_profile
+        monkeypatch.setattr("kiro.auth.Path.home", lambda: tmp_path)
+
+        manager = KiroAuthManager(creds_file=str(creds_file))
+
+        assert manager.profile_arn is None
+
+    def test_load_kiro_ide_profile_handles_corrupted_json_gracefully(self, temp_kiro_ide_creds_no_profile, tmp_path, monkeypatch):
+        """
+        What it does: Verifies corrupted profile.json file is caught and handled cleanly.
+        Purpose: Prevent crash on invalid profile.json.
+        """
+        creds_file, _ = temp_kiro_ide_creds_no_profile
+
+        profile_json_dir = tmp_path / "Library" / "Application Support" / "Kiro" / "User" / "globalStorage" / "kiro.kiroagent"
+        profile_json_dir.mkdir(parents=True, exist_ok=True)
+        profile_json_file = profile_json_dir / "profile.json"
+        with open(profile_json_file, "w", encoding="utf-8") as f:
+            f.write("{invalid json content")
+
+        monkeypatch.setattr("kiro.auth.Path.home", lambda: tmp_path)
+
+        manager = KiroAuthManager(creds_file=str(creds_file))
+
+        assert manager.profile_arn is None
+
+    def test_load_kiro_ide_profile_supports_alternative_json_keys(self, temp_kiro_ide_creds_no_profile, tmp_path, monkeypatch):
+        """
+        What it does: Verifies fallback to profileArn or profile_arn keys in profile.json.
+        Purpose: Ensure key variation compatibility.
+        """
+        creds_file, _ = temp_kiro_ide_creds_no_profile
+
+        profile_json_dir = tmp_path / "Library" / "Application Support" / "Kiro" / "User" / "globalStorage" / "kiro.kiroagent"
+        profile_json_dir.mkdir(parents=True, exist_ok=True)
+        profile_json_file = profile_json_dir / "profile.json"
+        alt_arn = "arn:aws:codewhisperer:eu-west-1:99999:profile/ALT"
+        with open(profile_json_file, "w", encoding="utf-8") as f:
+            json.dump({"profileArn": alt_arn}, f)
+
+        monkeypatch.setattr("kiro.auth.Path.home", lambda: tmp_path)
+
+        manager = KiroAuthManager(creds_file=str(creds_file))
+
+        assert manager.profile_arn == alt_arn
+        assert manager._detected_api_region == "eu-west-1"
+
+

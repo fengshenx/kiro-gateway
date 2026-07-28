@@ -423,13 +423,20 @@ class KiroAuthManager:
             if 'region' in data:
                 # Store region for SSO/OIDC token refresh only, don't update API host
                 # This allows auth in one region (e.g., ap-southeast-1) while API stays in another (e.g., us-east-1)
+                # NOTE: _api_host/_q_host are computed later in __init__ from final_api_region,
+                # so they are not available yet at this point.
                 self._sso_region = data['region']
-                logger.info(f"Region loaded from credentials file: sso_region={self._sso_region} (API stays at {self._region}, api_host={self._api_host}, q_host={self._q_host})")
+                self._detected_api_region = data['region']
+                logger.info(f"Region loaded from credentials file: sso_region={self._sso_region}; API region stays decoupled at {self._region}")
             
             # Load clientIdHash and device registration for Enterprise Kiro IDE
             if 'clientIdHash' in data:
                 self._client_id_hash = data['clientIdHash']
                 self._load_enterprise_device_registration(self._client_id_hash)
+            
+            # Auto-load profile ARN from Kiro IDE profile.json if clientIdHash is present and profileArn is empty
+            if self._client_id_hash and not self._profile_arn:
+                self._load_kiro_ide_profile()
             
             # Load AWS SSO OIDC specific fields (if directly in credentials file)
             if 'clientId' in data:
@@ -484,6 +491,70 @@ class KiroAuthManager:
             
         except Exception as e:
             logger.error(f"Error loading enterprise device registration: {e}")
+
+    def _load_kiro_ide_profile(self, profile_path: Optional[Path | str] = None) -> None:
+        """
+        Loads profile ARN from Kiro IDE's profile.json file if profile_arn is not set.
+
+        Kiro IDE stores the selected profile configuration at:
+        globalStorage/kiro.kiroagent/profile.json
+
+        Searches standard OS locations for Kiro IDE / VS Code extension global storage:
+        - macOS: ~/Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent/profile.json
+        - Linux: ~/.config/Kiro/User/globalStorage/kiro.kiroagent/profile.json
+        - Windows: %APPDATA%/Kiro/User/globalStorage/kiro.kiroagent/profile.json
+        - Fallbacks for standard VS Code directories (Code/User/...)
+
+        Args:
+            profile_path: Optional explicit path to profile.json (for testing or override)
+        """
+        if self._profile_arn:
+            return
+
+        if profile_path:
+            candidate_paths = [Path(profile_path)]
+        else:
+            home = Path.home()
+            candidate_paths = [
+                # macOS
+                home / "Library" / "Application Support" / "Kiro" / "User" / "globalStorage" / "kiro.kiroagent" / "profile.json",
+                home / "Library" / "Application Support" / "Code" / "User" / "globalStorage" / "kiro.kiroagent" / "profile.json",
+                # Linux
+                home / ".config" / "Kiro" / "User" / "globalStorage" / "kiro.kiroagent" / "profile.json",
+                home / ".config" / "Code" / "User" / "globalStorage" / "kiro.kiroagent" / "profile.json",
+            ]
+
+            appdata = os.getenv("APPDATA")
+            if appdata:
+                candidate_paths.append(Path(appdata) / "Kiro" / "User" / "globalStorage" / "kiro.kiroagent" / "profile.json")
+                candidate_paths.append(Path(appdata) / "Code" / "User" / "globalStorage" / "kiro.kiroagent" / "profile.json")
+
+            candidate_paths.extend([
+                # Windows fallback
+                home / "AppData" / "Roaming" / "Kiro" / "User" / "globalStorage" / "kiro.kiroagent" / "profile.json",
+                home / "AppData" / "Roaming" / "Code" / "User" / "globalStorage" / "kiro.kiroagent" / "profile.json",
+            ])
+
+        for path in candidate_paths:
+            if path.exists():
+                try:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+
+                    arn = data.get("arn") or data.get("profileArn") or data.get("profile_arn")
+                    if arn:
+                        self._profile_arn = arn
+                        logger.info(f"Loaded Kiro IDE profile ARN from {path}: {self._profile_arn}")
+
+                        if not self._detected_api_region:
+                            parts = arn.split(":")
+                            if len(parts) >= 4 and parts[3]:
+                                if re.match(r'^[a-z]+-[a-z]+-\d+$', parts[3]):
+                                    self._detected_api_region = parts[3]
+                                    logger.info(f"API region auto-detected from Kiro IDE profile ARN: {parts[3]}")
+                        return
+                except Exception as e:
+                    logger.warning(f"Failed to read Kiro IDE profile.json at {path}: {e}")
     
     def _save_credentials_to_file(self) -> None:
         """
